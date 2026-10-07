@@ -209,13 +209,43 @@ def parse_single_question_block(block_text: str):
     return res
 
 def parse_questions_message(text: str):
-    parsed_questions = []
-    blocks = re.split(r'\n\s*\n+', text.strip())
+    if not text or not text.strip():
+        return []
 
-    for block in blocks:
-        q = parse_single_question_block(block)
+    raw_lines = text.strip().split("\n")
+    tick_indices = [i for i, line in enumerate(raw_lines) if "✅" in line]
+
+    if not tick_indices:
+        q = parse_single_question_block(text)
+        return [q] if q else []
+
+    if len(tick_indices) == 1:
+        q = parse_single_question_block(text)
+        if q:
+            return [q]
+
+    parsed_questions = []
+    start_idx = 0
+
+    for idx, tick_i in enumerate(tick_indices):
+        if idx + 1 < len(tick_indices):
+            next_tick_i = tick_indices[idx + 1]
+            end_idx = next_tick_i
+            for search_i in range(next_tick_i - 1, tick_i, -1):
+                line_str = raw_lines[search_i].strip()
+                if re.match(r'^(?:\[?\d+[\/\]\)\.]|Q(?:uestion)?\s*\d+|(?:प्रश्न|प्र)\s*\d+)', line_str, re.IGNORECASE):
+                    end_idx = search_i
+                    break
+        else:
+            end_idx = len(raw_lines)
+
+        block_lines = raw_lines[start_idx:end_idx]
+        block_text = "\n".join(block_lines).strip()
+        
+        q = parse_single_question_block(block_text)
         if q:
             parsed_questions.append(q)
+        start_idx = end_idx
 
     if not parsed_questions:
         q = parse_single_question_block(text)
