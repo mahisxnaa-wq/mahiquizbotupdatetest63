@@ -835,6 +835,76 @@ async def handle_private_poll(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Quiz not found.")
 
 
+async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Creates and sends a normal poll (single line or interactive wizard).
+    Usage in Group/Private:
+    /poll Question text ? / Option 1 / Option 2 / Option 3 / Option 4
+    or /poll (starts interactive wizard in private chat)
+    """
+    msg = update.effective_message
+    if not msg:
+        return
+
+    chat = update.effective_chat
+    user = update.effective_user
+    text_args = " ".join(context.args).strip() if context.args else ""
+
+    if text_args:
+        # Single-line format: /poll Question? / Option1 / Option2 / Option3
+        if "/" in text_args:
+            parts = [p.strip() for p in text_args.split("/") if p.strip()]
+            q_text = parts[0]
+            options = parts[1:]
+        elif "\n" in text_args:
+            lines = [l.strip() for l in text_args.split("\n") if l.strip()]
+            q_text = lines[0]
+            options = lines[1:]
+        else:
+            q_text = text_args
+            options = []
+
+        if len(options) < 2:
+            await msg.reply_text(
+                "⚠️ **Poll ke kam se kam 2 options hone chahiye!**\n\n"
+                "**Format:**\n"
+                "`/poll Question text? / Option 1 / Option 2 / Option 3`",
+                parse_mode="Markdown"
+            )
+            return
+
+        options = [truncate_text(o, 100) for o in options[:10]]
+        q_text = truncate_text(q_text, 300)
+
+        try:
+            await context.bot.send_poll(
+                chat_id=chat.id,
+                question=q_text,
+                options=options,
+                is_anonymous=False
+            )
+        except Exception as e:
+            logger.error(f"Error sending poll: {e}")
+            await msg.reply_text(f"❌ Poll send nahi ho paya: {e}")
+    else:
+        # Interactive Wizard in Private Chat
+        if chat.type != "private":
+            await msg.reply_text(
+                "ℹ️ **Format:**\n"
+                "`/poll Question? / Option 1 / Option 2 / Option 3`",
+                parse_mode="Markdown"
+            )
+            return
+
+        user_states[user.id] = {"step": "WAITING_POLL_QUESTION"}
+        await msg.reply_text(
+            "📊 **Create Normal Poll**\n\n"
+            "Kripya **Poll ka Question** type karke bhejiyega:\n"
+            "*(Ya cancel karne ke liye /cancel bhejiyega)*",
+            parse_mode="Markdown"
+        )
+
+
 # ==========================================
 # MESSAGE HANDLER FOR QUIZ CREATION
 # ==========================================
@@ -1425,6 +1495,44 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         quiz_data["sections"] = existing_sections
         quiz_data["sections_enabled"] = 1
         await send_section_manager_screen(update, context, quiz_data)
+        return
+
+    elif step == "WAITING_POLL_QUESTION":
+        if not text or text.startswith("/"):
+            return
+        state["poll_question"] = text
+        state["step"] = "WAITING_POLL_OPTIONS"
+        await update.message.reply_text(
+            f"✅ **Question:** {text}\n\n"
+            "Ab **Options** bhejiyega slash (/) se alag karke:\n"
+            "*(e.g. Option 1 / Option 2 / Option 3 / Option 4)*",
+            parse_mode="Markdown"
+        )
+        return
+
+    elif step == "WAITING_POLL_OPTIONS":
+        if not text or text.startswith("/"):
+            return
+        parts = [p.strip() for p in text.split("/") if p.strip()]
+        if len(parts) < 2:
+            await update.message.reply_text("⚠️ Kam se kam 2 options hone chahiye (slash / se alag karke bhejiyega).")
+            return
+
+        q_text = truncate_text(state.get("poll_question", "Poll"), 300)
+        options = [truncate_text(o, 100) for o in parts[:10]]
+
+        del user_states[user.id]
+
+        try:
+            await context.bot.send_poll(
+                chat_id=chat.id,
+                question=q_text,
+                options=options,
+                is_anonymous=False
+            )
+            await update.message.reply_text("✅ Poll created & sent successfully!")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error creating poll: {e}")
         return
 
 
@@ -2646,6 +2754,30 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
             cleanup_quiz_session(quiz_id)
             return
 
+        # Pre-generate all image cards in RAM background thread for 0ms generation delay during quiz
+        pre_card_buffers = {}
+        card_mode = active_session.get("card_mode", quiz_data.get("card_mode", "1_card"))
+        if card_mode == "image_card" and generate_question_card is not None:
+            def _pre_gen_all():
+                for q_i, q_obj in enumerate(questions, start=1):
+                    if active_session.get("stopped", False):
+                        break
+                    try:
+                        rq = q_obj.get("question_text", "")
+                        opts = q_obj.get("options", [])
+                        buf = generate_question_card(
+                            question_text=rq,
+                            options=opts,
+                            q_number=q_i,
+                            total_questions=total_q,
+                            quiz_name=name
+                        )
+                        pre_card_buffers[q_i] = buf
+                    except Exception as e:
+                        logger.error(f"Pre-gen card Q{q_i} error: {e}")
+
+            asyncio.get_event_loop().run_in_executor(None, _pre_gen_all)
+
         # 2. Iterate through questions using a while loop to ensure index advances only after successful poll creation
         idx = 1
         last_poll_close_time = None
@@ -2742,9 +2874,10 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
                             logger.error(f"Error sending section announcement: {e}")
                 print(f"[QUIZ TIMING] Q{idx} section check: {((time.monotonic() - t_sec_start) * 1000.0):.2f}ms", flush=True)
 
-                # Send question photo if available
+                # Send question photo if available (skip in image_card mode — card already shows question)
+                card_mode = active_session.get("card_mode", quiz_data.get("card_mode", "1_card"))
                 photo_file_id = q_item.get("photo_file_id")
-                if photo_file_id:
+                if photo_file_id and card_mode != "image_card":
                     for photo_attempt in range(1, 4):
                         if active_session.get("stopped", False):
                             break
@@ -2764,38 +2897,53 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
                 has_long_opt = any(len(opt) > 40 for opt in options)
                 is_long_q = len(q_text) > 200
 
-                # IMAGE CARD MODE: Generate question card image and send as photo
+                # IMAGE CARD MODE: Use pre-generated question card image for instant delivery
                 image_card_sent = False
                 if card_mode == "image_card" and generate_question_card is not None:
                     try:
-                        card_buf = generate_question_card(
-                            question_text=raw_question,
-                            options=options,
-                            q_number=idx,
-                            total_questions=total_q,
-                            quiz_name=quiz_data.get("name", ""),
-                        )
-                        for img_attempt in range(1, 4):
-                            if active_session.get("stopped", False):
-                                break
-                            try:
-                                await bot.send_photo(chat_id=group_id, photo=card_buf, protect_content=True)
-                                image_card_sent = True
-                                print(f"[QUIZ TIMING] Q{idx} image card sent: {((time.monotonic() - t_long_start) * 1000.0):.2f}ms", flush=True)
-                                break
-                            except RetryAfter as e:
-                                await asyncio.sleep(float(e.retry_after))
-                            except Exception as e:
-                                logger.error(f"Error sending image card Q{idx} (attempt {img_attempt}/3): {e}")
-                                if img_attempt < 3:
-                                    card_buf.seek(0)
-                                    await asyncio.sleep(0.5)
-                        await asyncio.sleep(0.15)
+                        card_buf = pre_card_buffers.get(idx)
+                        if card_buf is None:
+                            card_buf = generate_question_card(
+                                question_text=raw_question,
+                                options=options,
+                                q_number=idx,
+                                total_questions=total_q,
+                                quiz_name=quiz_data.get("name", ""),
+                            )
+                        else:
+                            card_buf.seek(0)
+                        
+                        try:
+                            await bot.send_photo(
+                                chat_id=group_id,
+                                photo=card_buf,
+                                protect_content=True,
+                                read_timeout=20.0,
+                                write_timeout=20.0
+                            )
+                            image_card_sent = True
+                            print(f"[QUIZ TIMING] Q{idx} image card sent: {((time.monotonic() - t_long_start) * 1000.0):.2f}ms", flush=True)
+                        except RetryAfter as e:
+                            retry_wait = float(e.retry_after)
+                            logger.warning(f"Rate limited on image card Q{idx}. Waiting {retry_wait}s...")
+                            await asyncio.sleep(retry_wait)
+                            card_buf.seek(0)
+                            await bot.send_photo(
+                                chat_id=group_id,
+                                photo=card_buf,
+                                protect_content=True,
+                                read_timeout=20.0,
+                                write_timeout=20.0
+                            )
+                            image_card_sent = True
+                        except Exception as e:
+                            logger.error(f"Image card Q{idx} send error (continuing with poll): {e}")
                     except Exception as img_err:
                         logger.error(f"Failed to generate image card for Q{idx}: {img_err}")
 
-                # 2_CARD MODE: Send long question as text message
-                elif card_mode == "2_card" and (is_long_q or has_long_opt):
+                # 2_CARD MODE: Send full question text as text message first, then poll
+                card_2_sent = False
+                if card_mode == "2_card":
                     if has_long_opt:
                         opt_prefixes = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
                         formatted_opts = []
@@ -2810,14 +2958,15 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
                             "\n".join(formatted_opts)
                         )
                     else:
-                        long_msg_text = f"📋 Q{idx}/{total_q} ❓ {raw_question}"
-                    # Retry sending long message up to 5 times if rate-limited or transient network error occurs
+                        long_msg_text = f"📋 Q{idx}/{total_q}\n❓ {raw_question}"
+
                     for msg_attempt in range(1, 6):
                         if active_session.get("stopped", False):
                             break
                         try:
                             await bot.send_message(chat_id=group_id, text=long_msg_text, protect_content=True)
-                            print(f"[QUIZ TIMING] Q{idx} full question and options sent: {((time.monotonic() - t_long_start) * 1000.0):.2f}ms", flush=True)
+                            card_2_sent = True
+                            print(f"[QUIZ TIMING] Q{idx} full question text sent: {((time.monotonic() - t_long_start) * 1000.0):.2f}ms", flush=True)
                             break
                         except RetryAfter as e:
                             retry_wait = float(e.retry_after)
@@ -2828,7 +2977,6 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
                             if msg_attempt < 5:
                                 await asyncio.sleep(0.3)
                     
-                    # Short breather delay to prevent hitting group rate limit between message & poll
                     await asyncio.sleep(0.1)
 
                 # Send poll with robust retry & RetryAfter handling
@@ -2837,11 +2985,14 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
                 current_wait = active_session.get("timer", timer)
                 open_p = min(max(5, int(current_wait)), 600)
 
-                # In image_card mode: poll shows short A/B/C/D labels since full text is in image
-                if card_mode == "image_card" and image_card_sent:
+                # In image_card or 2_card mode: poll shows clean header since full text is in message
+                if card_mode in ["image_card", "2_card"] and (image_card_sent or card_2_sent):
                     opt_labels = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
                     poll_question_text = truncate_text(f"Q{idx}/{total_q} — Select correct option:", 300)
-                    display_options = [opt_labels[i] if i < len(opt_labels) else str(i+1) for i in range(len(options))]
+                    if card_mode == "image_card":
+                        display_options = [opt_labels[i] if i < len(opt_labels) else str(i+1) for i in range(len(options))]
+                    else:
+                        display_options = [truncate_text(opt, 100) for opt in options]
                 else:
                     q_text = f"[{idx}/{total_q}] {raw_question}"
                     poll_question_text = truncate_text(q_text, 300)
@@ -3414,6 +3565,8 @@ def main():
     app.add_handler(CommandHandler("edit", edit_command))
     app.add_handler(CommandHandler("done_edit", done_edit_command))
     app.add_handler(CommandHandler("clone", clone_command))
+    app.add_handler(CommandHandler("poll", poll_command))
+    app.add_handler(CommandHandler("createpoll", poll_command))
     app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
