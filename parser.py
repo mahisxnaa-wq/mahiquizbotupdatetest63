@@ -162,6 +162,19 @@ def parse_single_question_block(block_text: str):
     if not question_lines or len(raw_options) < 2 or len(raw_options) > 10:
         return None
 
+    # Match-the-following fix: detect matching combination options (e.g. "A-2, B-1, C-3, D-4")
+    # and separate them from list items (e.g. "A. आइसोबार (Isobar) - 1. समान वायुमंडलीय दाब")
+    match_combo_re = re.compile(r'^[A-Da-d]\s*[-–—]\s*\d')
+    combo_indices = [i for i, opt in enumerate(raw_options) if match_combo_re.match(opt.replace("✅", "").strip())]
+
+    if combo_indices and len(combo_indices) < len(raw_options):
+        # Some lines are matching combos, others are list items (part of question)
+        first_combo = combo_indices[0]
+        if first_combo > 0:
+            # Move non-combo lines back to question text
+            question_lines.extend(raw_options[:first_combo])
+            raw_options = raw_options[first_combo:]
+
     question_text = clean_question_text("\n".join(question_lines).strip())
     if not question_text:
         return None
