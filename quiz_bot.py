@@ -168,6 +168,128 @@ def truncate_text(text: str, max_len: int) -> str:
     return text[:max_len - 3] + "..."
 
 
+def is_match_question(question_text: str, options: list) -> bool:
+    """Detect if a question is Match the Following type."""
+    q_lower = question_text.lower()
+    # Hindi/English match keywords
+    match_keywords = ["सुमेलित", "सूची", "सुमेल", "मिलाइए", "मिलाएं", "match the", "match following", "सुमेलित कीजिए"]
+    if any(kw in q_lower for kw in match_keywords):
+        return True
+    # Options look like A-1, B-2, C-3 pattern
+    match_opt_pattern = re.compile(r'^[A-Da-d]\s*[-–]\s*\d', re.IGNORECASE)
+    if options and sum(1 for o in options if match_opt_pattern.match(str(o).strip())) >= 2:
+        return True
+    # Question has सूची-I / सूची-II or List I / List II
+    if re.search(r'सूची[\s\-]*[IiIiI12]', question_text) or re.search(r'list[\s\-]*[i1]', q_lower):
+        return True
+    return False
+
+
+def format_match_table_html(q_number: int, total_q: int, question_text: str) -> str:
+    """
+    Parses Match the Following question text and returns a Telegram HTML table message.
+    Handles formats like:
+      - "A. Term - 1. Definition B. Term - 2. Definition..."
+      - Multiline with सूची-I / सूची-II sections
+    """
+    lines = [l.strip() for l in question_text.strip().split("\n") if l.strip()]
+
+    main_q_lines = []
+    suchi1_entries = []   # A, B, C, D
+    suchi2_entries = []   # 1, 2, 3, 4
+    col1_header = "सूची-I"
+    col2_header = "सूची-II"
+
+    # Patterns
+    ab_pattern = re.compile(r'^([A-Da-d])\s*[\.\)]\s*(.+?)(?:\s*[-–]\s*(\d+[\.\)].+?))?$')
+    num_pattern = re.compile(r'^(\d+)\s*[\.\)]\s*(.+)$')
+    suchi1_pattern = re.compile(r'सूची[\s\-]*I\s*[:\-]?\s*(.*)', re.IGNORECASE)
+    suchi2_pattern = re.compile(r'सूची[\s\-]*II\s*[:\-]?\s*(.*)', re.IGNORECASE)
+    list1_pattern = re.compile(r'list[\s\-]*i\b\s*[:\-]?\s*(.*)', re.IGNORECASE)
+    list2_pattern = re.compile(r'list[\s\-]*ii\b\s*[:\-]?\s*(.*)', re.IGNORECASE)
+
+    in_suchi1 = False
+    in_suchi2 = False
+
+    for line in lines:
+        # Detect header lines
+        m1 = suchi1_pattern.match(line) or list1_pattern.match(line)
+        m2 = suchi2_pattern.match(line) or list2_pattern.match(line)
+
+        if m1:
+            in_suchi1 = True
+            in_suchi2 = False
+            if "(" in line:
+                col1_header = line.split(":")[0].strip() if ":" in line else line.strip()
+            continue
+        if m2:
+            in_suchi2 = True
+            in_suchi1 = False
+            if "(" in line:
+                col2_header = line.split(":")[0].strip() if ":" in line else line.strip()
+            continue
+
+        ab_m = ab_pattern.match(line)
+        num_m = num_pattern.match(line)
+
+        if ab_m:
+            letter = ab_m.group(1).upper()
+            term = ab_m.group(2).strip()
+            inline_def = ab_m.group(3).strip() if ab_m.group(3) else ""
+            suchi1_entries.append((letter, term))
+            if inline_def:
+                # Format like: A. Term - 1. Def all on one line
+                num_m2 = re.match(r'^(\d+)\s*[\.\)]\s*(.+)$', inline_def)
+                if num_m2:
+                    suchi2_entries.append((num_m2.group(1), num_m2.group(2).strip()))
+            in_suchi1 = False
+            in_suchi2 = False
+        elif num_m:
+            suchi2_entries.append((num_m.group(1), num_m.group(2).strip()))
+            in_suchi1 = False
+            in_suchi2 = False
+        else:
+            # Plain line — part of main question
+            if not suchi1_entries and not suchi2_entries:
+                main_q_lines.append(line)
+
+    # If parsing produced nothing useful, fall back to plain text
+    if not suchi1_entries:
+        return f"<b>Q{q_number}/{total_q}</b>\n{html.escape(question_text)}"
+
+    main_q_text = " ".join(main_q_lines).strip() if main_q_lines else question_text.split("\n")[0].strip()
+
+    # Build Telegram HTML table
+    col1_h_esc = html.escape(col1_header)
+    col2_h_esc = html.escape(col2_header)
+
+    table_rows = ""
+    max_rows = max(len(suchi1_entries), len(suchi2_entries))
+    for i in range(max_rows):
+        if i < len(suchi1_entries):
+            l, t = suchi1_entries[i]
+            c1 = html.escape(f"{l}. {t}")
+        else:
+            c1 = ""
+        if i < len(suchi2_entries):
+            n, d = suchi2_entries[i]
+            c2 = html.escape(f"{n}. {d}")
+        else:
+            c2 = ""
+        table_rows += f"<tr><td>{c1}</td><td>{c2}</td></tr>"
+
+    table_html = (
+        f"<b>❓ Q{q_number}/{total_q}</b>\n"
+        f"{html.escape(main_q_text)}\n\n"
+        f"<table>"
+        f"<tr><th>{col1_h_esc}</th><th>{col2_h_esc}</th></tr>"
+        f"{table_rows}"
+        f"</table>\n"
+        f"<i>कूट नीचे दिए Poll में चुनें 👇</i>"
+    )
+    return table_html
+
+
 def format_quiz_to_txt(questions: list) -> str:
     blocks = []
     for q in questions:
@@ -2922,6 +3044,33 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
                     
                     # Short breather delay to prevent hitting group rate limit between message & poll
                     await asyncio.sleep(0.1)
+
+                # MATCH TABLE MODE: Auto-detect Match the Following → send Telegram native HTML table
+                # Works for ALL card modes (1_card, 2_card, image_card)
+                if is_match_question(raw_question, options):
+                    match_table_html = format_match_table_html(idx, total_q, raw_question)
+                    for msg_attempt in range(1, 4):
+                        if active_session.get("stopped", False):
+                            break
+                        try:
+                            await bot.send_message(
+                                chat_id=group_id,
+                                text=match_table_html,
+                                parse_mode="HTML",
+                                protect_content=True
+                            )
+                            print(f"[QUIZ TIMING] Q{idx} match table sent: {((time.monotonic() - t_long_start) * 1000.0):.2f}ms", flush=True)
+                            await asyncio.sleep(0.15)
+                            break
+                        except RetryAfter as e:
+                            retry_wait = float(e.retry_after)
+                            logger.warning(f"Rate limited on match table Q{idx}. Waiting {retry_wait}s...")
+                            await asyncio.sleep(retry_wait)
+                        except Exception as e:
+                            logger.error(f"Match table send error Q{idx} (attempt {msg_attempt}/3): {e}")
+                            if msg_attempt < 3:
+                                await asyncio.sleep(0.3)
+
 
                 # Send poll with robust retry & RetryAfter handling
                 poll_msg = None
