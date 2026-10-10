@@ -835,76 +835,6 @@ async def handle_private_poll(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Quiz not found.")
 
 
-async def poll_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Creates and sends a normal poll (single line or interactive wizard).
-    Usage in Group/Private:
-    /poll Question text ? / Option 1 / Option 2 / Option 3 / Option 4
-    or /poll (starts interactive wizard in private chat)
-    """
-    msg = update.effective_message
-    if not msg:
-        return
-
-    chat = update.effective_chat
-    user = update.effective_user
-    text_args = " ".join(context.args).strip() if context.args else ""
-
-    if text_args:
-        # Single-line format: /poll Question? / Option1 / Option2 / Option3
-        if "/" in text_args:
-            parts = [p.strip() for p in text_args.split("/") if p.strip()]
-            q_text = parts[0]
-            options = parts[1:]
-        elif "\n" in text_args:
-            lines = [l.strip() for l in text_args.split("\n") if l.strip()]
-            q_text = lines[0]
-            options = lines[1:]
-        else:
-            q_text = text_args
-            options = []
-
-        if len(options) < 2:
-            await msg.reply_text(
-                "⚠️ **Poll ke kam se kam 2 options hone chahiye!**\n\n"
-                "**Format:**\n"
-                "`/poll Question text? / Option 1 / Option 2 / Option 3`",
-                parse_mode="Markdown"
-            )
-            return
-
-        options = [truncate_text(o, 100) for o in options[:10]]
-        q_text = truncate_text(q_text, 300)
-
-        try:
-            await context.bot.send_poll(
-                chat_id=chat.id,
-                question=q_text,
-                options=options,
-                is_anonymous=False
-            )
-        except Exception as e:
-            logger.error(f"Error sending poll: {e}")
-            await msg.reply_text(f"❌ Poll send nahi ho paya: {e}")
-    else:
-        # Interactive Wizard in Private Chat
-        if chat.type != "private":
-            await msg.reply_text(
-                "ℹ️ **Format:**\n"
-                "`/poll Question? / Option 1 / Option 2 / Option 3`",
-                parse_mode="Markdown"
-            )
-            return
-
-        user_states[user.id] = {"step": "WAITING_POLL_QUESTION"}
-        await msg.reply_text(
-            "📊 **Create Normal Poll**\n\n"
-            "Kripya **Poll ka Question** type karke bhejiyega:\n"
-            "*(Ya cancel karne ke liye /cancel bhejiyega)*",
-            parse_mode="Markdown"
-        )
-
-
 # ==========================================
 # MESSAGE HANDLER FOR QUIZ CREATION
 # ==========================================
@@ -1497,44 +1427,6 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         await send_section_manager_screen(update, context, quiz_data)
         return
 
-    elif step == "WAITING_POLL_QUESTION":
-        if not text or text.startswith("/"):
-            return
-        state["poll_question"] = text
-        state["step"] = "WAITING_POLL_OPTIONS"
-        await update.message.reply_text(
-            f"✅ **Question:** {text}\n\n"
-            "Ab **Options** bhejiyega slash (/) se alag karke:\n"
-            "*(e.g. Option 1 / Option 2 / Option 3 / Option 4)*",
-            parse_mode="Markdown"
-        )
-        return
-
-    elif step == "WAITING_POLL_OPTIONS":
-        if not text or text.startswith("/"):
-            return
-        parts = [p.strip() for p in text.split("/") if p.strip()]
-        if len(parts) < 2:
-            await update.message.reply_text("⚠️ Kam se kam 2 options hone chahiye (slash / se alag karke bhejiyega).")
-            return
-
-        q_text = truncate_text(state.get("poll_question", "Poll"), 300)
-        options = [truncate_text(o, 100) for o in parts[:10]]
-
-        del user_states[user.id]
-
-        try:
-            await context.bot.send_poll(
-                chat_id=chat.id,
-                question=q_text,
-                options=options,
-                is_anonymous=False
-            )
-            await update.message.reply_text("✅ Poll created & sent successfully!")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error creating poll: {e}")
-        return
-
 
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query_text = update.inline_query.query.strip()
@@ -2054,31 +1946,43 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             quiz_id = data.replace("qw_shuf_none_", "").strip()
             quiz_data = db.get_quiz(quiz_id)
             if quiz_data:
-                timer = session.get("timer", quiz_data.get("timer", 20)) if session else quiz_data.get("timer", 20)
-                mark = session.get("correct_mark", 1.0) if session else 1.0
-                save_last_settings(user.id, query.message.chat_id, timer, mark)
+                if not session:
+                    session = {"quiz_id": quiz_id, "correct_mark": 1.0, "timer": quiz_data.get("timer", 20)}
+                    group_wizard_sessions[wizard_key] = session
+                session["custom_questions"] = None
+
+                step_cm_text = "🎴 **Select Quiz Display Mode:**"
+                step_cm_keyboard = [
+                    [InlineKeyboardButton("🎴 1 Card (Poll Only)", callback_data=f"qw_cm_1_card_{quiz_id}")],
+                    [InlineKeyboardButton("📜 2 Cards (Text+Poll)", callback_data=f"qw_cm_2_card_{quiz_id}")],
+                    [InlineKeyboardButton("🖼️ Image Card (Photo+Poll)", callback_data=f"qw_cm_image_card_{quiz_id}")]
+                ]
                 try:
-                    await query.message.delete()
+                    await query.message.edit_text(step_cm_text, reply_markup=InlineKeyboardMarkup(step_cm_keyboard), parse_mode="Markdown")
                 except Exception:
                     pass
-                group_wizard_sessions.pop(wizard_key, None)
-                asyncio.create_task(run_quiz_session(context.bot, query.message.chat_id, quiz_data, query.message, custom_timer=timer, custom_correct_mark=mark, custom_questions=None))
             return
 
         if data.startswith("qw_shuf_q_"):
             quiz_id = data.replace("qw_shuf_q_", "").strip()
             quiz_data = db.get_quiz(quiz_id)
             if quiz_data:
-                timer = session.get("timer", quiz_data.get("timer", 20)) if session else quiz_data.get("timer", 20)
-                mark = session.get("correct_mark", 1.0) if session else 1.0
-                save_last_settings(user.id, query.message.chat_id, timer, mark)
+                if not session:
+                    session = {"quiz_id": quiz_id, "correct_mark": 1.0, "timer": quiz_data.get("timer", 20)}
+                    group_wizard_sessions[wizard_key] = session
                 shuffled_qs = apply_quiz_shuffle(quiz_data.get("questions", []), shuffle_mode="questions")
+                session["custom_questions"] = shuffled_qs
+
+                step_cm_text = "🎴 **Select Quiz Display Mode:**"
+                step_cm_keyboard = [
+                    [InlineKeyboardButton("🎴 1 Card (Poll Only)", callback_data=f"qw_cm_1_card_{quiz_id}")],
+                    [InlineKeyboardButton("📜 2 Cards (Text+Poll)", callback_data=f"qw_cm_2_card_{quiz_id}")],
+                    [InlineKeyboardButton("🖼️ Image Card (Photo+Poll)", callback_data=f"qw_cm_image_card_{quiz_id}")]
+                ]
                 try:
-                    await query.message.delete()
+                    await query.message.edit_text(step_cm_text, reply_markup=InlineKeyboardMarkup(step_cm_keyboard), parse_mode="Markdown")
                 except Exception:
                     pass
-                group_wizard_sessions.pop(wizard_key, None)
-                asyncio.create_task(run_quiz_session(context.bot, query.message.chat_id, quiz_data, query.message, custom_timer=timer, custom_correct_mark=mark, custom_questions=shuffled_qs))
             return
 
         if data.startswith("qw_shuf_o_") or data.startswith("qw_shuf_b_"):
@@ -2123,32 +2027,72 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             quiz_id = subparts[1] if len(subparts) > 1 else ""
             quiz_data = db.get_quiz(quiz_id)
             if quiz_data:
+                if not session:
+                    session = {"quiz_id": quiz_id, "correct_mark": 1.0, "timer": quiz_data.get("timer", 20)}
+                    group_wizard_sessions[wizard_key] = session
+                shuf_mode = session.get("shuffle_mode", "options")
+                shuffled_qs = apply_quiz_shuffle(quiz_data.get("questions", []), shuffle_mode=shuf_mode, opt_count=opt_count_val)
+                session["custom_questions"] = shuffled_qs
+
+                step_cm_text = "🎴 **Select Quiz Display Mode:**"
+                step_cm_keyboard = [
+                    [InlineKeyboardButton("🎴 1 Card (Poll Only)", callback_data=f"qw_cm_1_card_{quiz_id}")],
+                    [InlineKeyboardButton("📜 2 Cards (Text+Poll)", callback_data=f"qw_cm_2_card_{quiz_id}")],
+                    [InlineKeyboardButton("🖼️ Image Card (Photo+Poll)", callback_data=f"qw_cm_image_card_{quiz_id}")]
+                ]
+                try:
+                    await query.message.edit_text(step_cm_text, reply_markup=InlineKeyboardMarkup(step_cm_keyboard), parse_mode="Markdown")
+                except Exception:
+                    pass
+            return
+
+        if data.startswith("qw_cm_"):
+            rest = data.replace("qw_cm_", "")
+            if rest.startswith("1_card_"):
+                selected_card_mode = "1_card"
+                quiz_id = rest.replace("1_card_", "").strip()
+            elif rest.startswith("2_card_"):
+                selected_card_mode = "2_card"
+                quiz_id = rest.replace("2_card_", "").strip()
+            elif rest.startswith("image_card_"):
+                selected_card_mode = "image_card"
+                quiz_id = rest.replace("image_card_", "").strip()
+            else:
+                selected_card_mode = "1_card"
+                quiz_id = rest
+
+            quiz_data = db.get_quiz(quiz_id)
+            if quiz_data:
                 timer = session.get("timer", quiz_data.get("timer", 20)) if session else quiz_data.get("timer", 20)
                 mark = session.get("correct_mark", 1.0) if session else 1.0
-                shuf_mode = session.get("shuffle_mode", "options") if session else "options"
+                custom_qs = session.get("custom_questions", None) if session else None
                 save_last_settings(user.id, query.message.chat_id, timer, mark)
-                shuffled_qs = apply_quiz_shuffle(quiz_data.get("questions", []), shuffle_mode=shuf_mode, opt_count=opt_count_val)
                 try:
                     await query.message.delete()
                 except Exception:
                     pass
                 group_wizard_sessions.pop(wizard_key, None)
-                asyncio.create_task(run_quiz_session(context.bot, query.message.chat_id, quiz_data, query.message, custom_timer=timer, custom_correct_mark=mark, custom_questions=shuffled_qs))
+                asyncio.create_task(run_quiz_session(context.bot, query.message.chat_id, quiz_data, query.message, custom_timer=timer, custom_correct_mark=mark, custom_questions=custom_qs, custom_card_mode=selected_card_mode))
             return
 
         if data.startswith("qw_start_"):
             quiz_id = data.replace("qw_start_", "").strip()
             quiz_data = db.get_quiz(quiz_id)
             if quiz_data:
-                timer = session.get("timer", quiz_data.get("timer", 20)) if session else quiz_data.get("timer", 20)
-                mark = session.get("correct_mark", 1.0) if session else 1.0
-                save_last_settings(user.id, query.message.chat_id, timer, mark)
+                if not session:
+                    session = {"quiz_id": quiz_id, "correct_mark": 1.0, "timer": quiz_data.get("timer", 20)}
+                    group_wizard_sessions[wizard_key] = session
+
+                step_cm_text = "🎴 **Select Quiz Display Mode:**"
+                step_cm_keyboard = [
+                    [InlineKeyboardButton("🎴 1 Card (Poll Only)", callback_data=f"qw_cm_1_card_{quiz_id}")],
+                    [InlineKeyboardButton("📜 2 Cards (Text+Poll)", callback_data=f"qw_cm_2_card_{quiz_id}")],
+                    [InlineKeyboardButton("🖼️ Image Card (Photo+Poll)", callback_data=f"qw_cm_image_card_{quiz_id}")]
+                ]
                 try:
-                    await query.message.delete()
+                    await query.message.edit_text(step_cm_text, reply_markup=InlineKeyboardMarkup(step_cm_keyboard), parse_mode="Markdown")
                 except Exception:
                     pass
-                group_wizard_sessions.pop(wizard_key, None)
-                asyncio.create_task(run_quiz_session(context.bot, query.message.chat_id, quiz_data, query.message, custom_timer=timer, custom_correct_mark=mark))
             return
 
     if data == "create_sec_no":
@@ -2674,7 +2618,7 @@ def apply_quiz_shuffle(questions: list, shuffle_mode: str = "none", opt_count: s
     return shuffled_qs
 
 
-async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None, custom_timer=None, custom_correct_mark=None, custom_questions=None):
+async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None, custom_timer=None, custom_correct_mark=None, custom_questions=None, custom_card_mode=None):
     if quiz_engine_bot is not None:
         bot = quiz_engine_bot
 
@@ -2713,6 +2657,7 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
         "total_questions": total_q,
         "sections_enabled": sec_enabled,
         "sections": sections,
+        "card_mode": custom_card_mode if custom_card_mode is not None else quiz_data.get("card_mode", "1_card"),
         "participants": {},
         "active": True,
         "paused": False,
@@ -2941,9 +2886,8 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
                     except Exception as img_err:
                         logger.error(f"Failed to generate image card for Q{idx}: {img_err}")
 
-                # 2_CARD MODE: Send full question text as text message first, then poll
-                card_2_sent = False
-                if card_mode == "2_card":
+                # 2_CARD MODE: Send long question as text message
+                elif card_mode == "2_card" and (is_long_q or has_long_opt):
                     if has_long_opt:
                         opt_prefixes = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
                         formatted_opts = []
@@ -2958,15 +2902,14 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
                             "\n".join(formatted_opts)
                         )
                     else:
-                        long_msg_text = f"📋 Q{idx}/{total_q}\n❓ {raw_question}"
-
+                        long_msg_text = f"📋 Q{idx}/{total_q} ❓ {raw_question}"
+                    # Retry sending long message up to 5 times if rate-limited or transient network error occurs
                     for msg_attempt in range(1, 6):
                         if active_session.get("stopped", False):
                             break
                         try:
                             await bot.send_message(chat_id=group_id, text=long_msg_text, protect_content=True)
-                            card_2_sent = True
-                            print(f"[QUIZ TIMING] Q{idx} full question text sent: {((time.monotonic() - t_long_start) * 1000.0):.2f}ms", flush=True)
+                            print(f"[QUIZ TIMING] Q{idx} full question and options sent: {((time.monotonic() - t_long_start) * 1000.0):.2f}ms", flush=True)
                             break
                         except RetryAfter as e:
                             retry_wait = float(e.retry_after)
@@ -2977,6 +2920,7 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
                             if msg_attempt < 5:
                                 await asyncio.sleep(0.3)
                     
+                    # Short breather delay to prevent hitting group rate limit between message & poll
                     await asyncio.sleep(0.1)
 
                 # Send poll with robust retry & RetryAfter handling
@@ -2985,14 +2929,11 @@ async def run_quiz_session(bot, group_id: int, quiz_data: dict, status_msg=None,
                 current_wait = active_session.get("timer", timer)
                 open_p = min(max(5, int(current_wait)), 600)
 
-                # In image_card or 2_card mode: poll shows clean header since full text is in message
-                if card_mode in ["image_card", "2_card"] and (image_card_sent or card_2_sent):
+                # In image_card mode: poll ALWAYS shows short A/B/C/D labels for clean layout consistency
+                if card_mode == "image_card":
                     opt_labels = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
                     poll_question_text = truncate_text(f"Q{idx}/{total_q} — Select correct option:", 300)
-                    if card_mode == "image_card":
-                        display_options = [opt_labels[i] if i < len(opt_labels) else str(i+1) for i in range(len(options))]
-                    else:
-                        display_options = [truncate_text(opt, 100) for opt in options]
+                    display_options = [opt_labels[i] if i < len(opt_labels) else str(i+1) for i in range(len(options))]
                 else:
                     q_text = f"[{idx}/{total_q}] {raw_question}"
                     poll_question_text = truncate_text(q_text, 300)
@@ -3565,8 +3506,6 @@ def main():
     app.add_handler(CommandHandler("edit", edit_command))
     app.add_handler(CommandHandler("done_edit", done_edit_command))
     app.add_handler(CommandHandler("clone", clone_command))
-    app.add_handler(CommandHandler("poll", poll_command))
-    app.add_handler(CommandHandler("createpoll", poll_command))
     app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
