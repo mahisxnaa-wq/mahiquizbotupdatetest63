@@ -12,15 +12,19 @@ from PIL import Image, ImageDraw, ImageFont
 
 W, H = 1280, 720  # HD 16:9 Landscape Dimensions
 
-# Theme Palette
-BG_DARK = (10, 8, 26)
-CARD_BG = (17, 13, 38)
-BORDER_PURPLE = (99, 102, 241)
-BADGE_PURPLE = (124, 58, 237)
-TEXT_WHITE = (255, 255, 255)
-TEXT_MUTED = (195, 200, 225)
-OPT_BG = (23, 17, 48)
-OPT_BORDER = (67, 56, 202)
+# Theme Palette (Light Royal Purple Custom Theme)
+BG_DARK = (244, 247, 251)        # Overall Background: Soft White Gray #F4F7FB
+CARD_BG = (255, 255, 255)        # Question Card / Container: Pure White #FFFFFF
+BORDER_PURPLE = (124, 58, 237)   # Card Border: Royal Purple #7C3AED
+BADGE_PURPLE = (124, 58, 237)    # Q1 Badge: Royal Purple #7C3AED
+TEXT_MAIN = (15, 23, 42)         # Main Question Text: Crisp Dark Slate #0F172A (readable on white)
+TEXT_MUTED = (100, 116, 139)     # English Translation: Soft Slate Gray #64748B
+OPT_BG = (255, 255, 255)         # Options Box: Pure White #FFFFFF
+OPT_BORDER = (216, 222, 233)     # Option Border: Light Gray #D8DEE9
+LETTER_BG = (240, 231, 255)      # Option Letter Circle: Light Lavender #F0E7FF
+LETTER_TEXT = (124, 58, 237)    # Option Letter Text: Royal Purple #7C3AED
+TEXT_WHITE = (255, 255, 255)     # White Text for Badges
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_HI_FONT = os.path.join(BASE_DIR, "NotoSansDevanagari-Regular.ttf")
@@ -106,15 +110,15 @@ def get_pre_rendered_bg() -> Image.Image:
             logo_size = 480
             logo_r = logo_raw.resize((logo_size, logo_size), Image.Resampling.LANCZOS)
             
-            # 10% opacity
-            alpha_channel = Image.new("L", (logo_size, logo_size), 26)
+            # ~6% opacity (subtle background identity)
+            alpha_channel = Image.new("L", (logo_size, logo_size), 15)
             logo_r.putalpha(alpha_channel)
             
             lx = (W - logo_size) // 2
             ly = (H - logo_size) // 2 - 20
             bg_img.paste(logo_r, (lx, ly), logo_r)
         except Exception as le:
-            print(f"⚠️ Logo watermark notice: {le}")
+            print(f"Logo watermark notice: {le}")
 
     _PRE_RENDERED_BG = bg_img
     return _PRE_RENDERED_BG.copy()
@@ -123,6 +127,22 @@ def get_pre_rendered_bg() -> Image.Image:
 def _clean_option_text(opt_str: str) -> str:
     clean = re.sub(r'^(?:[A-Da-d0-9][\.\)\:]\s*|[\(\[\{][A-Da-d0-9][\)\]\}]\s*)', '', str(opt_str)).strip()
     return clean if clean else str(opt_str).strip()
+
+
+def _draw_mixed_text(draw, x, y, text, hi_font, en_font, fill):
+    """Render mixed Hindi+English text with dual fonts (no boxes).
+    Splits into Devanagari vs Latin/digit segments and uses correct font for each."""
+    segments = re.findall(r'[\u0900-\u0D7F]+|[^\u0900-\u0D7F]+', text)
+    cx = x
+    for seg in segments:
+        if re.search(r'[\u0900-\u0D7F]', seg):
+            font = hi_font
+        else:
+            font = en_font
+        draw.text((cx, y), seg, font=font, fill=fill)
+        bbox = draw.textbbox((0, 0), seg, font=font)
+        cx += bbox[2] - bbox[0]
+    return cx - x
 
 
 def generate_question_card(
@@ -167,7 +187,7 @@ def generate_question_card(
     draw = ImageDraw.Draw(card_layer)
 
     # Outer Frame Border
-    draw.rounded_rectangle([24, 24, W - 24, H - 24], radius=24, fill=CARD_BG + (215,), outline=BORDER_PURPLE + (255,), width=2)
+    draw.rounded_rectangle([24, 24, W - 24, H - 24], radius=24, fill=CARD_BG + (255,), outline=BORDER_PURPLE + (255,), width=2)
 
     # Top Left Q1 Badge
     badge_poly = [(44, 40), (140, 40), (165, 80), (140, 80), (44, 80)]
@@ -178,16 +198,16 @@ def generate_question_card(
     right_label = f"Marks: {marks_str}" if marks_str else f"Q {q_number}/{total_questions}"
     mbbox = draw.textbbox((0, 0), right_label, font=font_en_marks)
     mw = mbbox[2] - mbbox[0]
-    draw.rounded_rectangle([W - 64 - mw, 42, W - 44, 78], radius=12, fill=(24, 18, 55, 230), outline=BORDER_PURPLE + (255,), width=1)
+    draw.rounded_rectangle([W - 64 - mw, 42, W - 44, 78], radius=12, fill=BADGE_PURPLE + (255,), outline=BORDER_PURPLE + (255,), width=1)
     draw.text((W - 54 - mw, 49), right_label, font=font_en_marks, fill=TEXT_WHITE + (255,))
 
     # Question Container Box
     q_top = 100
     q_h = 130
-    draw.rounded_rectangle([44, q_top, W - 44, q_top + q_h], radius=18, fill=(22, 15, 48, 220), outline=BORDER_PURPLE + (255,), width=2)
+    draw.rounded_rectangle([44, q_top, W - 44, q_top + q_h], radius=18, fill=CARD_BG + (255,), outline=BORDER_PURPLE + (255,), width=2)
 
-    # Question Text
-    draw.text((68, q_top + 22), q_hi, font=font_hi_main, fill=TEXT_WHITE + (255,))
+    # Question Text — dual font rendering for mixed Hindi+English
+    _draw_mixed_text(draw, 68, q_top + 22, q_hi, font_hi_main, font_en_main, TEXT_MAIN + (255,))
     if q_en:
         draw.text((68, q_top + 72), q_en, font=font_en_main, fill=TEXT_MUTED + (255,))
 
@@ -213,34 +233,32 @@ def generate_question_card(
         y1 = opt_top + idx * (box_h + spacing)
         y2 = y1 + box_h
         
-        draw.rounded_rectangle([44, y1, W - 44, y2], radius=16, fill=OPT_BG + (210,), outline=OPT_BORDER + (255,), width=2)
+        draw.rounded_rectangle([44, y1, W - 44, y2], radius=16, fill=OPT_BG + (255,), outline=OPT_BORDER + (255,), width=2)
         
         cx1, cy1 = 64, y1 + 14
         cx2, cy2 = cx1 + 52, cy1 + 52
-        draw.ellipse([cx1, cy1, cx2, cy2], fill=BADGE_PURPLE + (255,))
+        draw.ellipse([cx1, cy1, cx2, cy2], fill=LETTER_BG + (255,))
         
         lbbox = draw.textbbox((0, 0), letter, font=font_en_letter)
         lw, lh = lbbox[2] - lbbox[0], lbbox[3] - lbbox[1]
-        draw.text((cx1 + (52 - lw)//2, cy1 + (52 - lh)//2 - 3), letter, font=font_en_letter, fill=TEXT_WHITE + (255,))
+        draw.text((cx1 + (52 - lw)//2, cy1 + (52 - lh)//2 - 3), letter, font=font_en_letter, fill=LETTER_TEXT + (255,))
         
         tx = 140
         ty = y1 + 24
-        draw.text((tx, ty), o_hi, font=font_hi_opt, fill=TEXT_WHITE + (255,))
+        # Option text — dual font rendering for mixed Hindi+English
+        hi_w = _draw_mixed_text(draw, tx, ty, o_hi, font_hi_opt, font_en_opt, TEXT_MAIN + (255,))
         
         if o_en:
-            hibbox = draw.textbbox((0, 0), o_hi, font=font_hi_opt)
-            hi_w = hibbox[2] - hibbox[0]
-            
             slash_x = tx + hi_w + 14
             draw.text((slash_x, ty), '/', font=font_en_opt, fill=TEXT_MUTED + (255,))
             
             en_x = slash_x + 18
             draw.text((en_x, ty + 2), o_en, font=font_en_opt, fill=TEXT_MUTED + (255,))
 
-    # Footer
-    footer_y = H - 45
+    # Footer (moved up 10px for better spacing)
+    footer_y = H - 55
     draw.line([(44, footer_y - 10), (W - 44, footer_y - 10)], fill=OPT_BORDER + (255,), width=1)
-    footer_text = "MAHI QUIZ BOT • STUDY • STRATEGY • DISCIPLINE"
+    footer_text = "MAHI QUIZ BOT \u2022 STUDY \u2022 STRATEGY \u2022 DISCIPLINE"
     fbbox = draw.textbbox((0, 0), footer_text, font=font_en_footer)
     fw = fbbox[2] - fbbox[0]
     draw.text(((W - fw) // 2, footer_y + 2), footer_text, font=font_en_footer, fill=TEXT_MUTED + (255,))
@@ -248,8 +266,8 @@ def generate_question_card(
     # Composite layers
     final_img = Image.alpha_composite(base_img, card_layer).convert("RGB")
 
-    # Ultra-Fast PNG Export (No optimize=True overhead for 10x faster encoding)
+    # Ultra-Fast JPEG Export (~45 KB optimized payload for instant Telegram delivery)
     buf = io.BytesIO()
-    final_img.save(buf, format="PNG")
+    final_img.save(buf, format="JPEG", quality=78, optimize=True)
     buf.seek(0)
     return buf
